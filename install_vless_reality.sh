@@ -39,9 +39,10 @@ SERVER=""
 UUID=""
 SHORT_ID=""
 FINGERPRINT="chrome"
+XRAY_VERSION="v25.8.3"
 
 usage() {
-    echo -e "\nUsage: sudo $0 --sni <fake-site.com> [--server <real-server-domain-or-ip>] [--uuid <uuid>] [--short <hex>] [--fp <fingerprint>]\n" >&2
+    echo -e "\nUsage: sudo $0 --sni <fake-site.com> [--server <real-server-domain-or-ip>] [--uuid <uuid>] [--short <hex>] [--fp <fingerprint>] [--version <xray-version>]\n" >&2
     exit 1
 }
 
@@ -57,6 +58,8 @@ while [[ $# -gt 0 ]]; do
             SHORT_ID="$2"; shift 2;;
         --fp)
             FINGERPRINT="$2"; shift 2;;
+        --version)
+            XRAY_VERSION="$2"; shift 2;;
         -h|--help)
             usage;;
         *)
@@ -140,11 +143,10 @@ case "$ARCH" in
 esac
 
 TMP_DIR=$(mktemp -d)
-LATEST_TAG=$(curl -s https://api.github.com/repos/XTLS/Xray-core/releases/latest | grep -Po '"tag_name":\s*"\K[^"]+')
 TAR_NAME="${ARCH_PKG}.zip"
-DOWNLOAD_URL="https://github.com/XTLS/Xray-core/releases/download/${LATEST_TAG}/${TAR_NAME}"
+DOWNLOAD_URL="https://github.com/XTLS/Xray-core/releases/download/${XRAY_VERSION}/${TAR_NAME}"
 
-echo -e "\n>>> Downloading Xray-core ${LATEST_TAG} (${ARCH_PKG})..."
+echo -e "\n>>> Downloading Xray-core ${XRAY_VERSION} (${ARCH_PKG})..."
 curl -L "$DOWNLOAD_URL" -o "$TMP_DIR/${TAR_NAME}"
 
 install -d /usr/local/bin /etc/xray
