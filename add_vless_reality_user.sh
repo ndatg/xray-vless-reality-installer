@@ -46,6 +46,22 @@ if [[ ! -f "$CONFIG" ]]; then
     echo "Config not found: $CONFIG" >&2; exit 1
 fi
 
+# Ensure jq is installed early
+if ! command -v jq &>/dev/null; then
+    echo "Installing jq ..."
+    if command -v apt &>/dev/null; then
+        apt update -y && DEBIAN_FRONTEND=noninteractive apt install -y jq
+    elif command -v dnf &>/dev/null; then
+        dnf install -y jq
+    elif command -v yum &>/dev/null; then
+        yum install -y epel-release && yum install -y jq
+    elif command -v pacman &>/dev/null; then
+        pacman -Sy --noconfirm jq
+    else
+        echo "Please install 'jq' manually." >&2; exit 1
+    fi
+fi
+
 # Generate UUID if missing
 if [[ -z "$UUID" ]]; then
     if command -v uuidgen &>/dev/null; then
@@ -58,7 +74,7 @@ fi
 # Generate Short ID if missing
 if [[ -z "$SHORT" ]]; then
     # Generate a unique Short ID that doesn't already exist
-    EXISTING_SIDS=$(jq -r '.inbounds[0].streamSettings.realitySettings.shortIds[]? // empty' "$CONFIG" 2>/dev/null | tr '\n' ' ')
+    EXISTING_SIDS=$(jq -r '.inbounds[0].streamSettings.realitySettings.shortIds[]? // empty' "$CONFIG" 2>/dev/null | tr '\n' ' ' || echo "")
     
     for attempt in {1..10}; do
         if command -v openssl &>/dev/null; then
@@ -77,22 +93,6 @@ if [[ -z "$SHORT" ]]; then
             echo "Warning: Could not generate unique Short ID after 10 attempts. Using: $SHORT"
         fi
     done
-fi
-
-# Ensure jq is installed
-if ! command -v jq &>/dev/null; then
-    echo "Installing jq ..."
-    if command -v apt &>/dev/null; then
-        apt update -y && DEBIAN_FRONTEND=noninteractive apt install -y jq
-    elif command -v dnf &>/dev/null; then
-        dnf install -y jq
-    elif command -v yum &>/dev/null; then
-        yum install -y epel-release && yum install -y jq
-    elif command -v pacman &>/dev/null; then
-        pacman -Sy --noconfirm jq
-    else
-        echo "Please install 'jq' manually." >&2; exit 1
-    fi
 fi
 
 TMP=$(mktemp)
