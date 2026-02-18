@@ -106,7 +106,7 @@ else
 fi
 
 # Add client UUID
-jq --arg uuid "$UUID" '(.inbounds[0].settings.clients //= []) | (.inbounds[0].settings.clients |= (if (map(.id) | index($uuid)) then . else . + [{"id":$uuid}] end))' "$TMP" > "$TMP.new"
+jq --arg uuid "$UUID" '(.inbounds[0].settings.clients //= []) | (.inbounds[0].settings.clients |= (if (map(.id) | index($uuid)) then . else . + [{"id":$uuid,"flow":"xtls-rprx-vision"}] end))' "$TMP" > "$TMP.new"
 
 # Check if Short ID already exists
 if jq -e --arg sid "$SHORT" '.inbounds[0].streamSettings.realitySettings.shortIds[]? | select(. == $sid)' "$TMP.new" &>/dev/null; then
@@ -137,7 +137,7 @@ SERVER="$(curl -s https://api.ipify.org || hostname -I | awk '{print $1}')"
 if [[ -n "$PBK" && -n "$SNI" ]]; then
     SHORT_ID="$SHORT"
     FINGERPRINT="chrome"  # Default fingerprint to match install script
-    URI="vless://${UUID}@${SERVER}:443?type=tcp&encryption=none&security=reality&pbk=${PBK}&sid=${SHORT_ID}&fp=${FINGERPRINT}&sni=${SNI}#${SHORT_ID}-${SNI}"
+    URI="vless://${UUID}@${SERVER}:443?type=tcp&encryption=none&flow=xtls-rprx-vision&security=reality&pbk=${PBK}&sid=${SHORT_ID}&fp=${FINGERPRINT}&sni=${SNI}#${SHORT_ID}-${SNI}"
 
     ################################
     # Show URI before generating QR #

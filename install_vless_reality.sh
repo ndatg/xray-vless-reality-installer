@@ -39,7 +39,7 @@ SERVER=""
 UUID=""
 SHORT_ID=""
 FINGERPRINT="chrome"
-XRAY_VERSION="v25.8.3"
+XRAY_VERSION=""
 
 usage() {
     echo -e "\nUsage: sudo $0 --sni <fake-site.com> [--server <real-server-domain-or-ip>] [--uuid <uuid>] [--short <hex>] [--fp <fingerprint>] [--version <xray-version>]\n" >&2
@@ -69,6 +69,16 @@ done
 
 if [[ -z "$SNI" ]]; then
     usage
+fi
+
+# Fetch latest Xray-core version from GitHub if not specified
+if [[ -z "$XRAY_VERSION" ]]; then
+    XRAY_VERSION="$(curl -s https://api.github.com/repos/XTLS/Xray-core/releases/latest | grep -Po '"tag_name":\s*"\K[^"]+' || true)"
+    if [[ -z "$XRAY_VERSION" ]]; then
+        echo "Unable to fetch latest Xray-core version from GitHub. Please pass --version <tag>." >&2
+        exit 1
+    fi
+    echo ">>> Latest Xray-core version: $XRAY_VERSION"
 fi
 
 # Determine SERVER if not provided (use public IPv4)
@@ -143,6 +153,7 @@ case "$ARCH" in
 esac
 
 TMP_DIR=$(mktemp -d)
+trap 'rm -rf "$TMP_DIR"' EXIT
 TAR_NAME="${ARCH_PKG}.zip"
 DOWNLOAD_URL="https://github.com/XTLS/Xray-core/releases/download/${XRAY_VERSION}/${TAR_NAME}"
 
@@ -152,15 +163,30 @@ curl -L "$DOWNLOAD_URL" -o "$TMP_DIR/${TAR_NAME}"
 install -d /usr/local/bin /etc/xray
 unzip -qo "$TMP_DIR/${TAR_NAME}" -d "$TMP_DIR"
 install -m 755 "$TMP_DIR/xray" /usr/local/bin/xray
-install -m 755 "$TMP_DIR/xray" /usr/local/bin/v2ray  # compatibility symlink name
 
 ##############################
 # 4. Generate REALITY keys   #
 ##############################
 
-KEY_OUTPUT=$(xray x25519)
-PRIVATE_KEY=$(echo "$KEY_OUTPUT" | awk '/Private/{print $3}')
-PUBLIC_KEY=$(echo  "$KEY_OUTPUT" | awk '/Public/{print $3}')
+KEY_OUTPUT=$(/usr/local/bin/xray x25519)
+
+# v25.3.6+: "PrivateKey: <val>" / "Password: <val>"
+# older:    "Private key: <val>" / "Public key: <val>"
+PRIVATE_KEY=$(echo "$KEY_OUTPUT" | awk '/PrivateKey:/{print $2}')
+if [[ -z "$PRIVATE_KEY" ]]; then
+    PRIVATE_KEY=$(echo "$KEY_OUTPUT" | awk '/Private key:/{print $3}')
+fi
+
+PUBLIC_KEY=$(echo "$KEY_OUTPUT" | awk '/Password:/{print $2}')
+if [[ -z "$PUBLIC_KEY" ]]; then
+    PUBLIC_KEY=$(echo "$KEY_OUTPUT" | awk '/Public key:/{print $3}')
+fi
+
+if [[ -z "$PRIVATE_KEY" || -z "$PUBLIC_KEY" ]]; then
+    echo "Failed to generate X25519 keys. Output was:" >&2
+    echo "$KEY_OUTPUT" >&2
+    exit 1
+fi
 
 # Persist public key for future user additions
 echo "$PUBLIC_KEY" > /etc/xray/public.key
@@ -183,7 +209,8 @@ cat > "$CONFIG_PATH" <<EOF
       "settings": {
         "clients": [
           {
-            "id": "$UUID"
+            "id": "$UUID",
+            "flow": "xtls-rprx-vision"
           }
         ],
         "decryption": "none"
@@ -246,27 +273,31 @@ systemctl restart xray
 WEBROOT="/var/www/html"
 mkdir -p "$WEBROOT"
 
-# Replace the default Nginx site with a redirect to the fake SNI
-DEFAULT_SITE="/etc/nginx/sites-available/default"
-
-# Backup original default if not already backed up
-if [[ -f "$DEFAULT_SITE" && ! -f "${DEFAULT_SITE}.orig" ]]; then
-    cp "$DEFAULT_SITE" "${DEFAULT_SITE}.orig"
-fi
-
-cat > "$DEFAULT_SITE" <<NGINX
-server {
+NGINX_CONF_CONTENT="server {
     listen 80 default_server;
     listen [::]:80 default_server;
     server_name _;
 
     return 301 https://${SNI}\$request_uri;
-}
-NGINX
+}"
 
-# Ensure the symlink exists
-if [[ -d /etc/nginx/sites-enabled ]]; then
-    ln -sf "$DEFAULT_SITE" /etc/nginx/sites-enabled/default
+# Debian/Ubuntu style (sites-available + sites-enabled)
+if [[ -d /etc/nginx/sites-available ]]; then
+    DEFAULT_SITE="/etc/nginx/sites-available/default"
+    if [[ -f "$DEFAULT_SITE" && ! -f "${DEFAULT_SITE}.orig" ]]; then
+        cp "$DEFAULT_SITE" "${DEFAULT_SITE}.orig"
+    fi
+    echo "$NGINX_CONF_CONTENT" > "$DEFAULT_SITE"
+    if [[ -d /etc/nginx/sites-enabled ]]; then
+        ln -sf "$DEFAULT_SITE" /etc/nginx/sites-enabled/default
+    fi
+# RHEL/Fedora/Arch style (conf.d)
+elif [[ -d /etc/nginx/conf.d ]]; then
+    DEFAULT_SITE="/etc/nginx/conf.d/default.conf"
+    if [[ -f "$DEFAULT_SITE" && ! -f "${DEFAULT_SITE}.orig" ]]; then
+        cp "$DEFAULT_SITE" "${DEFAULT_SITE}.orig"
+    fi
+    echo "$NGINX_CONF_CONTENT" > "$DEFAULT_SITE"
 fi
 
 systemctl enable --now nginx
@@ -276,7 +307,7 @@ systemctl reload nginx
 # 8. Generate URI + QR code   #
 ################################
 
-URI="vless://${UUID}@${SERVER}:443?type=tcp&encryption=none&security=reality&pbk=${PUBLIC_KEY}&sid=${SHORT_ID}&fp=${FINGERPRINT}&sni=${SNI}#${SHORT_ID}-${SNI}"
+URI="vless://${UUID}@${SERVER}:443?type=tcp&encryption=none&flow=xtls-rprx-vision&security=reality&pbk=${PUBLIC_KEY}&sid=${SHORT_ID}&fp=${FINGERPRINT}&sni=${SNI}#${SHORT_ID}-${SNI}"
 
 cat <<GENERATE
 
