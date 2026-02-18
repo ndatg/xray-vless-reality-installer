@@ -239,14 +239,27 @@ cat > "$CONFIG_PATH" <<EOF
 }
 EOF
 
+# Allow nobody (nogroup on Debian, nobody on RHEL) to read the config
+if getent group nogroup &>/dev/null; then
+    chown root:nogroup "$CONFIG_PATH"
+else
+    chown root:nobody "$CONFIG_PATH"
+fi
 chmod 640 "$CONFIG_PATH"
 
 ##############################
 # 6. systemd service         #
 ##############################
 
+# Determine nobody's group (nogroup on Debian, nobody on RHEL)
+if getent group nogroup &>/dev/null; then
+    NOBODY_GROUP="nogroup"
+else
+    NOBODY_GROUP="nobody"
+fi
+
 SERVICE_FILE="/etc/systemd/system/xray.service"
-cat > "$SERVICE_FILE" <<'SERVICE'
+cat > "$SERVICE_FILE" <<SERVICE
 [Unit]
 Description=Xray Service (VLESS + REALITY)
 Documentation=https://github.com/XTLS/Xray-core
@@ -254,6 +267,10 @@ After=network.target nss-lookup.target
 
 [Service]
 Type=simple
+User=nobody
+Group=${NOBODY_GROUP}
+CapabilityBoundingSet=CAP_NET_BIND_SERVICE
+AmbientCapabilities=CAP_NET_BIND_SERVICE
 ExecStart=/usr/local/bin/xray run -config /etc/xray/config.json
 Restart=on-failure
 LimitNOFILE=51200

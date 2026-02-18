@@ -122,6 +122,14 @@ mv "$TMP" "$TMP.new"
 mv "$TMP.new" "$CONFIG"
 rm "$TMP" || true
 
+# Restore permissions for nobody
+if getent group nogroup &>/dev/null; then
+    chown root:nogroup "$CONFIG"
+else
+    chown root:nobody "$CONFIG"
+fi
+chmod 640 "$CONFIG"
+
 # Restart Xray to apply changes
 systemctl restart xray
 
