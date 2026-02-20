@@ -64,23 +64,18 @@ generate_short_id() {
     echo "$sid"  # last resort after 10 collisions
 }
 
-# Set ownership and permissions on config.json (readable by the nobody service)
+# Set ownership and permissions on config.json (readable by the xray service user)
 set_config_permissions() {
     local path="${1:-$CONFIG}"
-    if getent group nogroup &>/dev/null; then
-        chown root:nogroup "$path"
-    else
-        chown root:nobody "$path"
-    fi
+    chown root:xray "$path"
     chmod 640 "$path"
 }
 
-# Return the correct unprivileged group name for the current distro
-get_nobody_group() {
-    if getent group nogroup &>/dev/null; then
-        echo "nogroup"
-    else
-        echo "nobody"
+# Create a dedicated system user/group for the Xray service
+ensure_xray_user() {
+    if ! id -u xray &>/dev/null; then
+        useradd --system --no-create-home --shell /usr/sbin/nologin xray
+        echo ">>> Created system user 'xray'."
     fi
 }
 
@@ -283,6 +278,9 @@ new_install() {
     local dns_json="\"$dns1\""
     [[ -n "$dns2" ]] && dns_json="\"$dns1\", \"$dns2\""
 
+    # ---- Create dedicated service user (needed before setting file permissions) ----
+    ensure_xray_user
+
     cat > "$CONFIG" <<EOF
 {
   "dns": {
@@ -330,10 +328,7 @@ new_install() {
 EOF
     set_config_permissions
 
-    # ---- Create and start systemd service ----
-    local nobody_group
-    nobody_group="$(get_nobody_group)"
-
+    # ---- Create systemd unit ----
     cat > /etc/systemd/system/xray.service <<SERVICE
 [Unit]
 Description=Xray Service (VLESS + REALITY)
@@ -342,8 +337,8 @@ After=network.target nss-lookup.target
 
 [Service]
 Type=simple
-User=nobody
-Group=${nobody_group}
+User=xray
+Group=xray
 CapabilityBoundingSet=CAP_NET_BIND_SERVICE
 AmbientCapabilities=CAP_NET_BIND_SERVICE
 ExecStart=/usr/local/bin/xray run -config /etc/xray/config.json
