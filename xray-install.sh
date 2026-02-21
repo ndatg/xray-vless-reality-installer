@@ -64,9 +64,11 @@ generate_short_id() {
     echo "$sid"  # last resort after 10 collisions
 }
 
-# Set ownership and permissions on config.json (readable by the xray service user)
+# Set ownership and permissions on config.json and /etc/xray/ directory
 set_config_permissions() {
     local path="${1:-$CONFIG}"
+    chown root:xray "$(dirname "$path")"
+    chmod 750 "$(dirname "$path")"
     chown root:xray "$path"
     chmod 640 "$path"
 }
