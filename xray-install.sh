@@ -254,12 +254,13 @@ new_install() {
     # ---- Generate X25519 key pair for REALITY ----
     local key_output private_key public_key
     key_output=$(/usr/local/bin/xray x25519)
-
+    
+    # Use $NF (last field) to handle varying output formats across Xray versions
     # Support both old ("Private key: / Public key:") and new ("PrivateKey: / Password:") formats
-    private_key=$(echo "$key_output" | awk '/PrivateKey:/{print $2}')
+    private_key=$(echo "$key_output" | awk '/PrivateKey/{print $NF}')
     [[ -z "$private_key" ]] && private_key=$(echo "$key_output" | awk '/Private key:/{print $3}')
 
-    public_key=$(echo "$key_output" | awk '/Password:/{print $2}')
+    public_key=$(echo "$key_output" | awk '/Password/{print $NF}')
     [[ -z "$public_key" ]] && public_key=$(echo "$key_output" | awk '/Public key:/{print $3}')
 
     if [[ -z "$private_key" || -z "$public_key" ]]; then
