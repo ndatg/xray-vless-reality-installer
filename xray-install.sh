@@ -14,6 +14,7 @@
 set -euo pipefail
 
 CONFIG="/etc/xray/config.json"
+SERVER_ADDR_FILE="/etc/xray/server.addr"
 
 # ==============================================================================
 # Utility functions
@@ -28,10 +29,33 @@ is_xray_installed() {
 
 # Resolve the server's public IPv4 address (multiple fallbacks)
 detect_public_ip() {
-    curl -4s https://api.ipify.org 2>/dev/null \
-        || curl -4s https://ifconfig.me 2>/dev/null \
-        || hostname -I 2>/dev/null | awk '{print $1}' \
-        || true
+    local url ip
+    for url in https://api.ipify.org https://ifconfig.me; do
+        ip="$(curl -4fsS --connect-timeout 5 --max-time 10 "$url" 2>/dev/null | tr -d '[:space:]' || true)"
+        # Accept only something that looks like an IPv4 address (not an error page)
+        if [[ "$ip" =~ ^[0-9]{1,3}(\.[0-9]{1,3}){3}$ ]]; then
+            echo "$ip"; return 0
+        fi
+    done
+    hostname -I 2>/dev/null | awk '{print $1}' || true
+}
+
+# Return the server address clients connect to.
+# Uses the address saved at install time; for older installs without it,
+# auto-detects (or asks) and saves it for next time.
+get_server_address() {
+    local server=""
+    [[ -f "$SERVER_ADDR_FILE" ]] && server="$(head -n1 "$SERVER_ADDR_FILE")"
+    if [[ -z "$server" ]]; then
+        server="$(detect_public_ip)"
+        if [[ -z "$server" ]]; then
+            echo "Unable to auto-detect public IP." >&2
+            read -rp "Enter the server's public IP or domain: " server
+            [[ -z "$server" ]] && { echo "Server address is required." >&2; exit 1; }
+        fi
+        echo "$server" > "$SERVER_ADDR_FILE"
+    fi
+    echo "$server"
 }
 
 # Generate a random UUID using the best available method
@@ -71,6 +95,28 @@ set_config_permissions() {
     chmod 750 "$(dirname "$path")"
     chown root:xray "$path"
     chmod 640 "$path"
+}
+
+# Validate an Xray config file; print Xray's output and fail if it is invalid
+# $1 — path to config (optional, defaults to $CONFIG)
+validate_config() {
+    local path="${1:-$CONFIG}" output
+    if ! output=$(/usr/local/bin/xray run -test -format json -config "$path" 2>&1); then
+        echo "Xray config validation failed ($path):" >&2
+        echo "$output" >&2
+        return 1
+    fi
+}
+
+# Restart the Xray service and make sure it is actually running
+restart_xray() {
+    systemctl restart xray
+    sleep 2
+    if ! systemctl is-active --quiet xray; then
+        echo "Xray service failed to start. Recent logs:" >&2
+        journalctl -u xray -n 20 --no-pager >&2 || true
+        exit 1
+    fi
 }
 
 # Create a dedicated system user/group for the Xray service
@@ -124,11 +170,11 @@ enable_bbr() {
         echo ">>> BBR congestion control already enabled."
     else
         echo -e "\n>>> Enabling TCP BBR congestion control..."
-        grep -qF 'net.core.default_qdisc=fq' /etc/sysctl.conf \
-            || echo 'net.core.default_qdisc=fq' >> /etc/sysctl.conf
-        grep -qF 'net.ipv4.tcp_congestion_control=bbr' /etc/sysctl.conf \
-            || echo 'net.ipv4.tcp_congestion_control=bbr' >> /etc/sysctl.conf
-        sysctl -p
+        # Use a drop-in: /etc/sysctl.conf is no longer read at boot on newer distros (e.g. Debian 13)
+        local bbr_conf="/etc/sysctl.d/99-xray-bbr.conf"
+        mkdir -p /etc/sysctl.d
+        printf '%s\n' 'net.core.default_qdisc=fq' 'net.ipv4.tcp_congestion_control=bbr' > "$bbr_conf"
+        sysctl -p "$bbr_conf"
     fi
 }
 
@@ -163,13 +209,17 @@ new_install() {
 
     # ---- Public IP ----
     local server
-    server="$(detect_public_ip)"
-    if [[ -z "$server" ]]; then
+    local detected input
+    detected="$(detect_public_ip)"
+    if [[ -n "$detected" ]]; then
+        echo "Detected public IP: $detected"
+        read -rp "Server address for clients (IP or domain) [$detected]: " input
+        server="${input:-$detected}"
+    else
         echo "Unable to auto-detect public IP." >&2
         read -rp "Enter the server's public IP or domain: " server
-        [[ -z "$server" ]] && { echo "Server address is required." >&2; exit 1; }
     fi
-    echo "Detected public IP: $server"
+    [[ -z "$server" ]] && { echo "Server address is required." >&2; exit 1; }
 
     # ---- SNI domain (required) ----
     local sni
@@ -222,7 +272,7 @@ new_install() {
 
     # ---- Download latest Xray-core binary ----
     local xray_version
-    xray_version="$(curl -s https://api.github.com/repos/XTLS/Xray-core/releases/latest \
+    xray_version="$(curl -fsSL --connect-timeout 10 --max-time 30 https://api.github.com/repos/XTLS/Xray-core/releases/latest \
         | grep -Po '"tag_name":\s*"\K[^"]+' || true)"
     if [[ -z "$xray_version" ]]; then
         echo "Unable to fetch latest Xray-core version from GitHub." >&2
@@ -240,16 +290,20 @@ new_install() {
 
     local tmp_dir
     tmp_dir=$(mktemp -d)
+    # Clean up the temp dir even if download/unzip fails and set -e aborts the script
+    # shellcheck disable=SC2064  # expand now: tmp_dir is local
+    trap "rm -rf '$tmp_dir'" EXIT
 
     local zip_name="${arch_pkg}.zip"
     local download_url="https://github.com/XTLS/Xray-core/releases/download/${xray_version}/${zip_name}"
     echo ">>> Downloading Xray-core ${xray_version} (${arch_pkg})..."
-    curl -L "$download_url" -o "$tmp_dir/$zip_name"
+    curl -fL --connect-timeout 10 --max-time 300 "$download_url" -o "$tmp_dir/$zip_name"
 
     install -d /usr/local/bin /etc/xray
     unzip -qo "$tmp_dir/$zip_name" -d "$tmp_dir"
     install -m 755 "$tmp_dir/xray" /usr/local/bin/xray
     rm -rf "$tmp_dir"
+    trap - EXIT
 
     # ---- Generate X25519 key pair for REALITY ----
     local key_output private_key public_key
@@ -271,6 +325,7 @@ new_install() {
 
     # Persist public key for future client additions
     echo "$public_key" > /etc/xray/public.key
+    echo "$server" > "$SERVER_ADDR_FILE"
 
     # ---- Generate first client credentials ----
     local uuid short_id
@@ -330,6 +385,7 @@ new_install() {
 }
 EOF
     set_config_permissions
+    validate_config || exit 1
 
     # ---- Create systemd unit ----
     cat > /etc/systemd/system/xray.service <<SERVICE
@@ -354,7 +410,7 @@ SERVICE
 
     systemctl daemon-reload
     systemctl enable xray
-    systemctl restart xray
+    restart_xray
 
     # ---- Configure nginx on port 80 (camouflage redirect to SNI) ----
     mkdir -p /var/www/html
@@ -393,6 +449,7 @@ Systemd service    : xray (running)
 Fake SNI           : $sni
 Connect to host    : $server
 Public key         : $public_key (saved to /etc/xray/public.key)
+Server address     : saved to $SERVER_ADDR_FILE
 Short ID           : $short_id
 UUID               : $uuid
 
@@ -406,6 +463,9 @@ EOF
 
 add_client() {
     ensure_jq
+
+    local server
+    server="$(get_server_address)"
 
     # Generate unique credentials
     local uuid short_id existing_sids
@@ -427,17 +487,17 @@ add_client() {
         (.inbounds[0].streamSettings.realitySettings.shortIds //= []) |
         .inbounds[0].streamSettings.realitySettings.shortIds += [$sid]
     ' "$CONFIG" > "$tmp"
+    validate_config "$tmp" || { rm -f "$tmp"; exit 1; }
     mv "$tmp" "$CONFIG"
 
     set_config_permissions
-    systemctl restart xray
+    restart_xray
 
     # Build and display the connection URI
-    local pbk sni server
+    local pbk sni
     pbk="$(cat /etc/xray/public.key 2>/dev/null || echo "")"
     sni="$(jq -r '.inbounds[0].streamSettings.realitySettings.serverNames[0] // empty' "$CONFIG")"
     [[ -z "$sni" ]] && sni="$(jq -r '.inbounds[0].streamSettings.realitySettings.dest' "$CONFIG" | cut -d: -f1)"
-    server="$(detect_public_ip)"
 
     show_connection_info "$uuid" "$server" "$pbk" "$short_id" "$sni"
 
@@ -500,10 +560,11 @@ remove_client() {
         .inbounds[0].settings.clients |= del(.[$idx]) |
         .inbounds[0].streamSettings.realitySettings.shortIds |= del(.[$idx])
     ' "$CONFIG" > "${CONFIG}.tmp"
+    validate_config "${CONFIG}.tmp" || { rm -f "${CONFIG}.tmp"; exit 1; }
     mv "${CONFIG}.tmp" "$CONFIG"
 
     set_config_permissions
-    systemctl restart xray
+    restart_xray
 
     # Clean up QR code image if it exists
     rm -f "/etc/xray/vless-${target_uuid}.png"
@@ -529,6 +590,7 @@ remove_xray() {
     rm -f /usr/local/bin/xray
     rm -rf /etc/xray
     rm -f /etc/systemd/system/xray.service
+    rm -f /etc/sysctl.d/99-xray-bbr.conf
     systemctl daemon-reload
 
     # Offer to revert nginx changes
