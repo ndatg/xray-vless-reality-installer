@@ -1,6 +1,6 @@
 # Xray VLESS + REALITY Installer
 
-One script to install and manage a VLESS + REALITY VPN server on any Linux VPS. No domain, no certificates, no Docker — works out of the box in under 2 minutes.
+One script to install and manage a VLESS + REALITY VPN server on any Linux VPS, with a choice of TCP + XTLS Vision or XHTTP transport. No domain, no certificates — works out of the box in under 2 minutes. A separate script is available for Docker containers without systemd.
 
 ## Quick Start
 
@@ -83,13 +83,17 @@ The script installs all dependencies automatically.
 
 ## How It Works
 
-REALITY is a next-gen transport protocol by the Xray team. It makes your VPN traffic indistinguishable from a regular HTTPS connection to a real website (e.g. `www.google.com`). Unlike traditional TLS proxies, REALITY requires no certificates and no domain — just a VPS with a public IP.
+REALITY is a next-gen security layer by the Xray team. It makes your VPN traffic indistinguishable from a regular HTTPS connection to a real website (the SNI site, e.g. `www.cloudflare.com`). Unlike traditional TLS proxies, REALITY requires no certificates and no domain — just a VPS with a public IP. On top of REALITY the traffic is carried either over TCP with XTLS Vision or over XHTTP (see below).
+
+### Choosing the SNI site
+
+The SNI site should be a foreign site that supports TLS 1.3 and HTTP/2 (required for XHTTP) and does not redirect to another domain — the script checks this during installation. Prefer a site hosted in the same network as your VPS over popular domains (Google, Microsoft, Apple): a VPS IP claiming to be one of them is easy to spot. Some sites pass the check but still fail with REALITY (e.g. `www.microsoft.com` with its very large certificate chain), so test a connection after installing.
 
 ## Transport: TCP + Vision or XHTTP
 
 | | TCP + XTLS Vision | XHTTP |
 |---|---|---|
-| Client support | All apps | Newer apps only — check yours supports `type=xhttp` |
+| Client support | All apps | Apps with a recent Xray-core; see [Client Apps](#client-apps) |
 | How it looks | One long TLS connection | HTTP requests (harder to fingerprint by connection pattern) |
 | Flow | `xtls-rprx-vision` | none (Vision works only over TCP) |
 
@@ -117,15 +121,21 @@ and restart Xray.
 
 ## Client Apps
 
-Import the generated URI or scan the QR code:
+Import the generated URI or scan the QR code. All apps below support **TCP + XTLS Vision**.
+**XHTTP** is an Xray-core feature: apps built on a recent Xray-core (v25.3.6+) support it,
+apps built on sing-box usually do not.
 
-| Platform | App |
-|----------|-----|
-| iOS | [Shadowrocket](https://apps.apple.com/app/shadowrocket/id932747118), [V2BOX](https://apps.apple.com/app/v2box-v2ray-client/id6446814690) |
-| macOS | [Shadowrocket](https://apps.apple.com/app/shadowrocket/id932747118), [V2BOX](https://apps.apple.com/app/v2box-v2ray-client/id6446814690) |
-| Android | [v2rayNG](https://github.com/2dust/v2rayNG), [NekoBox](https://github.com/MatsuriDayo/NekoBoxForAndroid) |
-| Windows | [v2rayN](https://github.com/2dust/v2rayN) |
-| Linux | [v2rayA](https://github.com/v2rayA/v2rayA), [Nekoray](https://github.com/Mahdi-zarei/nekoray), [Hiddify](https://github.com/hiddify/hiddify-app) |
+| Platform | App | XHTTP |
+|----------|-----|-------|
+| iOS | [Shadowrocket](https://apps.apple.com/app/shadowrocket/id932747118), [V2BOX](https://apps.apple.com/app/v2box-v2ray-client/id6446814690) | check the app version |
+| macOS | [Shadowrocket](https://apps.apple.com/app/shadowrocket/id932747118), [V2BOX](https://apps.apple.com/app/v2box-v2ray-client/id6446814690) | check the app version |
+| Android | [v2rayNG](https://github.com/2dust/v2rayNG) | yes (Xray-core) |
+| Android | [NekoBox](https://github.com/MatsuriDayo/NekoBoxForAndroid) | no (sing-box core) |
+| Windows | [v2rayN](https://github.com/2dust/v2rayN) | yes (Xray-core) |
+| Linux | [v2rayA](https://github.com/v2rayA/v2rayA) | yes, with Xray-core |
+| Linux | [Nekoray](https://github.com/Mahdi-zarei/nekoray), [Hiddify](https://github.com/hiddify/hiddify-app) | usually no (sing-box core) |
+
+With XHTTP, keep **Mux** disabled in the app.
 
 ## File Locations
 
