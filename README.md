@@ -17,7 +17,7 @@ To manage clients later, just re-run `sudo bash xray-install.sh`.
 - Generates REALITY keys, UUID, Short ID
 - Lets you choose DNS (Google, Cloudflare, Quad9, AdGuard, OpenDNS)
 - Configures systemd service on port 443
-- Sets up nginx camouflage on port 80
+- Optionally sets up nginx on port 80 (redirect to the SNI site)
 - Enables TCP BBR for better speed
 - Prints connection URI + QR code
 

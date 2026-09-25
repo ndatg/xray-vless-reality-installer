@@ -15,6 +15,8 @@ set -euo pipefail
 
 CONFIG="/etc/xray/config.json"
 SERVER_ADDR_FILE="/etc/xray/server.addr"
+NGINX_MARKER="# Managed by xray-install.sh"
+NGINX_SITES=(/etc/nginx/sites-available/default /etc/nginx/conf.d/default.conf)
 
 # ==============================================================================
 # Utility functions
@@ -145,19 +147,22 @@ ensure_jq() {
 }
 
 # Install all required packages for a fresh installation
+# $1 — "yes" to also install nginx (optional)
 install_deps() {
+    local extra=()
+    [[ "${1:-no}" == "yes" ]] && extra+=(nginx)
     echo -e "\n>>> Installing dependencies..."
     if command -v apt &>/dev/null; then
         apt-get update -y
         DEBIAN_FRONTEND=noninteractive apt-get install -y \
-            curl unzip tar uuid-runtime nginx qrencode jq
+            curl unzip tar uuid-runtime qrencode jq "${extra[@]}"
     elif command -v dnf &>/dev/null; then
-        dnf install -y curl unzip tar nginx qrencode jq
+        dnf install -y curl unzip tar qrencode jq "${extra[@]}"
     elif command -v yum &>/dev/null; then
-        yum install -y curl unzip tar nginx qrencode epel-release
+        yum install -y curl unzip tar qrencode epel-release "${extra[@]}"
         yum install -y jq
     elif command -v pacman &>/dev/null; then
-        pacman -Sy --noconfirm curl unzip tar nginx qrencode jq
+        pacman -Sy --noconfirm curl unzip tar qrencode jq "${extra[@]}"
     else
         echo "Unsupported package manager. Install dependencies manually." >&2
         exit 1
@@ -256,6 +261,15 @@ new_install() {
         *)  dns1="8.8.8.8";         dns2="8.8.4.4" ;;
     esac
 
+    # ---- Optional nginx on port 80 ----
+    local setup_nginx
+    echo ""
+    echo "Optionally, nginx can answer on port 80 with a redirect to https://$sni."
+    echo "It gives little extra camouflage (REALITY already covers port 443) and"
+    echo "replaces nginx's default site config — skip it if nginx already serves a site here."
+    read -rp "Set up nginx on port 80? [y/N]: " setup_nginx
+    if [[ "$setup_nginx" =~ ^[Yy]$ ]]; then setup_nginx="yes"; else setup_nginx="no"; fi
+
     # ---- Confirmation summary ----
     echo ""
     echo "Xray VLESS+REALITY will be installed with these settings:"
@@ -263,11 +277,12 @@ new_install() {
     echo "   Server IP  : $server"
     echo "   SNI domain : $sni"
     echo "   DNS servers: $dns1${dns2:+, $dns2}"
+    echo "   nginx :80  : $setup_nginx"
     echo ""
     read -rp "Press Enter to continue or Ctrl+C to abort..."
 
     # ---- Install system packages ----
-    install_deps
+    install_deps "$setup_nginx"
     enable_bbr
 
     # ---- Download latest Xray-core binary ----
@@ -412,30 +427,32 @@ SERVICE
     systemctl enable xray
     restart_xray
 
-    # ---- Configure nginx on port 80 (camouflage redirect to SNI) ----
-    mkdir -p /var/www/html
-
-    local nginx_conf="server {
+    # ---- Configure nginx on port 80 (optional camouflage redirect to SNI) ----
+    if [[ "$setup_nginx" == "yes" ]]; then
+        local nginx_conf="$NGINX_MARKER
+server {
     listen 80 default_server;
     listen [::]:80 default_server;
     server_name _;
+    server_tokens off;
 
     return 301 https://${sni}\$request_uri;
 }"
 
-    if [[ -d /etc/nginx/sites-available ]]; then
-        local site="/etc/nginx/sites-available/default"
-        [[ -f "$site" && ! -f "${site}.orig" ]] && cp "$site" "${site}.orig"
-        echo "$nginx_conf" > "$site"
-        [[ -d /etc/nginx/sites-enabled ]] && ln -sf "$site" /etc/nginx/sites-enabled/default
-    elif [[ -d /etc/nginx/conf.d ]]; then
-        local site="/etc/nginx/conf.d/default.conf"
-        [[ -f "$site" && ! -f "${site}.orig" ]] && cp "$site" "${site}.orig"
-        echo "$nginx_conf" > "$site"
-    fi
+        if [[ -d /etc/nginx/sites-available ]]; then
+            local site="${NGINX_SITES[0]}"
+            [[ -f "$site" && ! -f "${site}.orig" ]] && cp "$site" "${site}.orig"
+            echo "$nginx_conf" > "$site"
+            [[ -d /etc/nginx/sites-enabled ]] && ln -sf "$site" /etc/nginx/sites-enabled/default
+        elif [[ -d /etc/nginx/conf.d ]]; then
+            local site="${NGINX_SITES[1]}"
+            [[ -f "$site" && ! -f "${site}.orig" ]] && cp "$site" "${site}.orig"
+            echo "$nginx_conf" > "$site"
+        fi
 
-    systemctl enable --now nginx
-    systemctl reload nginx
+        systemctl enable --now nginx
+        systemctl reload nginx
+    fi
 
     # ---- Display connection info ----
     show_connection_info "$uuid" "$server" "$public_key" "$short_id" "$sni"
@@ -593,19 +610,34 @@ remove_xray() {
     rm -f /etc/sysctl.d/99-xray-bbr.conf
     systemctl daemon-reload
 
-    # Offer to revert nginx changes
-    echo ""
-    read -rp "Also stop and disable nginx? [y/N]: " remove_nginx
-    if [[ "$remove_nginx" =~ ^[Yy]$ ]]; then
-        systemctl stop nginx 2>/dev/null || true
-        systemctl disable nginx 2>/dev/null || true
-        # Restore the original nginx config from backup if available
-        for orig in /etc/nginx/sites-available/default.orig /etc/nginx/conf.d/default.conf.orig; do
-            if [[ -f "$orig" ]]; then
-                mv "$orig" "${orig%.orig}"
-                echo "Restored original nginx config from $orig"
-            fi
-        done
+    # Offer to revert nginx changes — only if this script configured nginx
+    # (marker in the site file, or a .orig backup left by older script versions)
+    local site nginx_sites=()
+    for site in "${NGINX_SITES[@]}"; do
+        if grep -qF "$NGINX_MARKER" "$site" 2>/dev/null || [[ -f "${site}.orig" ]]; then
+            nginx_sites+=("$site")
+        fi
+    done
+
+    if (( ${#nginx_sites[@]} > 0 )); then
+        echo ""
+        read -rp "Also revert the nginx redirect and stop nginx? [y/N]: " remove_nginx
+        if [[ "$remove_nginx" =~ ^[Yy]$ ]]; then
+            systemctl stop nginx 2>/dev/null || true
+            systemctl disable nginx 2>/dev/null || true
+            for site in "${nginx_sites[@]}"; do
+                if [[ -f "${site}.orig" ]]; then
+                    # Restore the original nginx config from backup
+                    mv "${site}.orig" "$site"
+                    echo "Restored original nginx config: $site"
+                else
+                    # No backup: the file was created by this script
+                    rm -f "$site"
+                    [[ "$site" == /etc/nginx/sites-available/* ]] && rm -f /etc/nginx/sites-enabled/default
+                    echo "Removed nginx config: $site"
+                fi
+            done
+        fi
     fi
 
     echo ""
