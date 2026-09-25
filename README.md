@@ -33,6 +33,7 @@ Differences from the host script:
 - Lets you choose DNS (Google, Cloudflare, Quad9, AdGuard, OpenDNS)
 - Configures systemd service on port 443 with autostart at boot
 - Validates the config and checks that Xray actually started (shows logs if not)
+- Blocks clients from reaching the server's local and private addresses (see below)
 - Optionally sets up nginx on port 80 (redirect to the SNI site)
 - Enables TCP BBR for better speed (persistent across reboots)
 - Prints connection URI + QR code
@@ -60,6 +61,8 @@ Select an option:
 
 If autostart at boot was turned off, the script re-enables it. Config changes
 (adding/removing clients) are validated before they replace the running config.
+If the config was created by an older version without the private-address block,
+the script offers to add it.
 
 **Remove Xray** deletes the binary, configuration, service and BBR settings.
 If the script set up nginx, it also offers to restore the original nginx config.
@@ -75,6 +78,21 @@ The script installs all dependencies automatically.
 ## How It Works
 
 REALITY is a next-gen transport protocol by the Xray team. It makes your VPN traffic indistinguishable from a regular HTTPS connection to a real website (e.g. `www.google.com`). Unlike traditional TLS proxies, REALITY requires no certificates and no domain — just a VPS with a public IP.
+
+## Private Address Blocking
+
+Clients can use the server only to reach the internet. Connections to the
+server's own and internal addresses are dropped:
+
+- `127.0.0.0/8`, `::1` — services on the server itself (databases, admin panels, APIs listening on localhost)
+- `10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`, `100.64.0.0/10`, `fc00::/7` — provider/LAN networks, Docker host
+- `169.254.0.0/16`, `fe80::/10` — link-local, including the cloud metadata service `169.254.169.254`
+
+This also covers hostnames that resolve to these addresses (`localhost`, entries
+from `/etc/hosts`, public domains pointing to `127.0.0.1`). Xray's own DNS queries
+are routed directly, so a local system resolver keeps working. To allow access,
+remove the `"outboundTag": "block"` rule from `routing.rules` in `/etc/xray/config.json`
+and restart Xray.
 
 ## Client Apps
 
