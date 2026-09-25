@@ -14,17 +14,26 @@ To manage clients later, just re-run `sudo bash xray-install.sh`.
 
 **First run** — interactive installation:
 - Installs Xray-core (latest version, auto-detects architecture)
+- Detects the server's public IP — you can keep it or enter a domain instead
 - Generates REALITY keys, UUID, Short ID
 - Lets you choose DNS (Google, Cloudflare, Quad9, AdGuard, OpenDNS)
-- Configures systemd service on port 443
+- Configures systemd service on port 443 with autostart at boot
+- Validates the config and checks that Xray actually started (shows logs if not)
 - Optionally sets up nginx on port 80 (redirect to the SNI site)
-- Enables TCP BBR for better speed
+- Enables TCP BBR for better speed (persistent across reboots)
 - Prints connection URI + QR code
 
-**Every next run** — management menu:
+**Every next run** — service status and management menu:
 
 ```
 Xray VLESS+REALITY is already installed.
+
+   Service  : active (since Thu 2026-09-25 21:00:00 MSK)
+   Autostart: enabled
+   Version  : 26.3.27
+   Address  : 203.0.113.10
+   SNI      : www.cloudflare.com
+   Clients  : 3
 
 Select an option:
    1) Add a new client
@@ -33,11 +42,17 @@ Select an option:
    4) Exit
 ```
 
+If autostart at boot was turned off, the script re-enables it. Config changes
+(adding/removing clients) are validated before they replace the running config.
+
+**Remove Xray** deletes the binary, configuration, service and BBR settings.
+If the script set up nginx, it also offers to restore the original nginx config.
+
 ## Requirements
 
 - Linux VPS (Debian, Ubuntu, CentOS, Fedora, Arch)
 - Root access
-- Ports 443 and 80 open
+- Port 443 open (and port 80 if you enable the nginx redirect)
 
 The script installs all dependencies automatically.
 
@@ -64,7 +79,11 @@ Import the generated URI or scan the QR code:
 | `/usr/local/bin/xray` | Xray-core binary |
 | `/etc/xray/config.json` | Server configuration |
 | `/etc/xray/public.key` | REALITY public key |
+| `/etc/xray/server.addr` | Server address (IP or domain) used in client links |
 | `/etc/xray/vless-*.png` | QR code images |
+| `/etc/systemd/system/xray.service` | Systemd service unit |
+| `/etc/sysctl.d/99-xray-bbr.conf` | TCP BBR settings |
+| `/etc/nginx/sites-available/default` or `/etc/nginx/conf.d/default.conf` | nginx redirect (only if enabled; original saved as `*.orig`) |
 
 ## License
 
