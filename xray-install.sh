@@ -15,6 +15,9 @@ set -euo pipefail
 
 CONFIG="/etc/xray/config.json"
 SERVER_ADDR_FILE="/etc/xray/server.addr"
+# Private/local destinations clients must not reach through the proxy
+# (server's localhost, LAN/provider networks, cloud metadata 169.254.169.254)
+PRIVATE_IPS_JSON='["0.0.0.0/8", "10.0.0.0/8", "100.64.0.0/10", "127.0.0.0/8", "169.254.0.0/16", "172.16.0.0/12", "192.168.0.0/16", "::1/128", "fc00::/7", "fe80::/10"]'
 NGINX_MARKER="# Managed by xray-install.sh"
 NGINX_SITES=(/etc/nginx/sites-available/default /etc/nginx/conf.d/default.conf)
 
@@ -131,6 +134,48 @@ restart_xray() {
         journalctl -u xray -n 20 --no-pager >&2 || true
         exit 1
     fi
+}
+
+# Check whether the config already blocks private destinations
+has_private_block() {
+    jq -e '[.routing.rules[]? | select(.outboundTag == "block")] | length > 0' "$CONFIG" &>/dev/null
+}
+
+# Add the private-address block to an existing config (older installs):
+# tag DNS and outbounds, route Xray's own DNS queries directly (the system
+# resolver may be 127.0.0.53 / 127.0.0.11), send private IPs to blackhole.
+# freedom uses ForceIP: with UseIP, names Xray's DNS can't resolve (localhost,
+# entries from /etc/hosts) fall back to the system resolver and bypass the block.
+add_private_block() {
+    local tmp
+    tmp=$(mktemp)
+    jq --argjson ips "$PRIVATE_IPS_JSON" '
+        .dns.tag = "dns-internal" |
+        .outbounds |= map(if .protocol == "freedom" then (.tag //= "direct") | .settings.domainStrategy = "ForceIP" else . end) |
+        (if any(.outbounds[]; .tag == "block") then . else .outbounds += [{"tag": "block", "protocol": "blackhole"}] end) |
+        .routing.domainStrategy = "IPIfNonMatch" |
+        .routing.rules = [
+            {"type": "field", "inboundTag": ["dns-internal"], "outboundTag": "direct"},
+            {"type": "field", "ip": $ips, "outboundTag": "block"}
+        ] + ((.routing.rules // []) | map(select(.outboundTag != "block" and .inboundTag != ["dns-internal"])))
+    ' "$CONFIG" > "$tmp"
+    validate_config "$tmp" || { rm -f "$tmp"; exit 1; }
+    mv "$tmp" "$CONFIG"
+    set_config_permissions
+    restart_xray
+    echo ">>> Access to private/local addresses is now blocked."
+}
+
+# Offer the private-address block if the config does not have it yet
+offer_private_block() {
+    command -v jq &>/dev/null || return 0
+    has_private_block && return 0
+    echo ""
+    echo "Your config lets clients reach the server's local and private addresses"
+    echo "(localhost services, internal networks, cloud metadata)."
+    local answer
+    read -rp "Block them now? [Y/n]: " answer
+    [[ "$answer" =~ ^[Nn]$ ]] || add_private_block
 }
 
 # Create a dedicated system user/group for the Xray service
@@ -369,7 +414,8 @@ new_install() {
     cat > "$CONFIG" <<EOF
 {
   "dns": {
-    "servers": [$dns_json]
+    "servers": [$dns_json],
+    "tag": "dns-internal"
   },
   "log": {
     "loglevel": "warning"
@@ -406,8 +452,16 @@ new_install() {
       }
     }
   ],
+  "routing": {
+    "domainStrategy": "IPIfNonMatch",
+    "rules": [
+      { "type": "field", "inboundTag": ["dns-internal"], "outboundTag": "direct" },
+      { "type": "field", "ip": $PRIVATE_IPS_JSON, "outboundTag": "block" }
+    ]
+  },
   "outbounds": [
-    { "protocol": "freedom", "settings": { "domainStrategy": "UseIP" } }
+    { "tag": "direct", "protocol": "freedom", "settings": { "domainStrategy": "ForceIP" } },
+    { "tag": "block", "protocol": "blackhole" }
   ]
 }
 EOF
@@ -722,6 +776,7 @@ fi
 
 if is_xray_installed; then
     ensure_xray_autostart
+    offer_private_block
     manage_menu
 else
     new_install
