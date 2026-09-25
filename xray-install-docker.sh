@@ -362,11 +362,48 @@ install_deps() {
     fi
 }
 
+# Check the REALITY target against Project X's minimum requirements:
+# TLS 1.3, HTTP/2 (needed by XHTTP) and no redirect to another domain.
+# Warns and asks before continuing; network problems look the same as "no TLS 1.3".
+check_sni_target() {
+    local sni="$1" result http_ver code redirect redirect_host answer
+    local problems=()
+    echo -e "\n>>> Checking SNI target https://$sni (TLS 1.3, HTTP/2, no redirect)..."
+    result="$(curl -sS -o /dev/null --tlsv1.3 --http2 --connect-timeout 5 --max-time 10 \
+        -w '%{http_version} %{http_code} %{redirect_url}' "https://$sni/" 2>/dev/null || true)"
+    read -r http_ver code redirect <<< "$result"
+    if [[ -z "$code" || "$code" == "000" ]]; then
+        problems+=("no TLS 1.3 connection (site unreachable or TLS 1.3 not supported)")
+    else
+        [[ "$http_ver" == "2" ]] || problems+=("no HTTP/2 support (got HTTP/$http_ver)")
+        if [[ -n "${redirect:-}" ]]; then
+            redirect_host="${redirect#*://}"; redirect_host="${redirect_host%%[/:?]*}"
+            [[ "$redirect_host" == "$sni" ]] || problems+=("redirects to another domain: $redirect_host")
+        fi
+    fi
+    if (( ${#problems[@]} == 0 )); then
+        echo ">>> SNI target looks good."
+        return 0
+    fi
+    echo "Warning: $sni does not meet REALITY target requirements:" >&2
+    printf '   - %s\n' "${problems[@]}" >&2
+    read -rp "Continue anyway? [y/N]: " answer
+    [[ "$answer" =~ ^[Yy]$ ]] || { echo "Aborted. Choose another SNI domain." >&2; exit 1; }
+}
+
 # Build a VLESS+REALITY URI and display it along with a QR code
-# Arguments: uuid server public_key short_id sni [fingerprint]
+# Arguments: uuid server public_key short_id sni [network] [xhttp_path]
+# network: "tcp" (with XTLS Vision) or "xhttp" (no flow; Vision is not supported)
 show_connection_info() {
-    local uuid="$1" server="$2" pbk="$3" sid="$4" sni="$5" fp="${6:-chrome}"
-    local uri="vless://${uuid}@${server}:443?type=tcp&encryption=none&flow=xtls-rprx-vision&security=reality&pbk=${pbk}&sid=${sid}&fp=${fp}&sni=${sni}#${sid}-${sni}"
+    local uuid="$1" server="$2" pbk="$3" sid="$4" sni="$5" network="${6:-tcp}" path="${7:-/}"
+    local fp="chrome" uri spx
+    # spiderX: crawler start path, recommended to differ per client
+    spx="%2F$(openssl rand -hex 4 2>/dev/null || generate_short_id)"
+    if [[ "$network" == "xhttp" ]]; then
+        uri="vless://${uuid}@${server}:443?type=xhttp&encryption=none&security=reality&pbk=${pbk}&sid=${sid}&fp=${fp}&sni=${sni}&spx=${spx}&path=${path//\//%2F}&mode=auto#${sid}-${sni}"
+    else
+        uri="vless://${uuid}@${server}:443?type=tcp&encryption=none&flow=xtls-rprx-vision&security=reality&pbk=${pbk}&sid=${sid}&fp=${fp}&sni=${sni}&spx=${spx}#${sid}-${sni}"
+    fi
 
     echo ""
     echo "Generated VLESS+REALITY URI (copy or scan):"
@@ -440,6 +477,21 @@ new_install() {
         *)  dns1="8.8.8.8";         dns2="8.8.4.4" ;;
     esac
 
+    # ---- Transport ----
+    local transport_choice network xhttp_path=""
+    echo ""
+    echo "Select a transport:"
+    echo "   1) TCP + XTLS Vision  (default; supported by all client apps)"
+    echo "   2) XHTTP              (newer, splits traffic into HTTP requests and is harder"
+    echo "                          to fingerprint; check that your client app supports it)"
+    read -rp "Transport [1-2, default 1]: " transport_choice
+    if [[ "${transport_choice:-1}" == "2" ]]; then
+        network="xhttp"
+        xhttp_path="/$(openssl rand -hex 4 2>/dev/null || generate_short_id)"
+    else
+        network="tcp"
+    fi
+
     # ---- Confirmation summary ----
     echo ""
     echo "Xray VLESS+REALITY will be installed with these settings:"
@@ -447,6 +499,7 @@ new_install() {
     echo "   Server IP  : $server"
     echo "   SNI domain : $sni"
     echo "   DNS servers: $dns1${dns2:+, $dns2}"
+    echo "   Transport  : $network"
     echo ""
     read -rp "Press Enter to continue or Ctrl+C to abort..."
 
@@ -494,6 +547,9 @@ new_install() {
     fi
     install -d /etc/xray
 
+    # ---- Verify the SNI target site ----
+    check_sni_target "$sni"
+
     # ---- Generate X25519 key pair for REALITY ----
     local key_output private_key public_key
     key_output=$("$XRAY_BIN" x25519)
@@ -525,6 +581,15 @@ new_install() {
     local dns_json="\"$dns1\""
     [[ -n "$dns2" ]] && dns_json="\"$dns1\", \"$dns2\""
 
+    # Transport-specific parts: Vision flow for TCP, path/mode for XHTTP
+    local client_json xhttp_json=""
+    if [[ "$network" == "xhttp" ]]; then
+        client_json="{ \"id\": \"$uuid\" }"
+        xhttp_json=$'\n        "xhttpSettings": { "path": "'"$xhttp_path"'", "mode": "auto" },'
+    else
+        client_json="{ \"id\": \"$uuid\", \"flow\": \"xtls-rprx-vision\" }"
+    fi
+
     cat > "$CONFIG" <<EOF
 {
   "dns": {
@@ -541,19 +606,16 @@ new_install() {
       "protocol": "vless",
       "settings": {
         "clients": [
-          {
-            "id": "$uuid",
-            "flow": "xtls-rprx-vision"
-          }
+          $client_json
         ],
         "decryption": "none"
       },
       "streamSettings": {
-        "network": "tcp",
+        "network": "$network",$xhttp_json
         "security": "reality",
         "realitySettings": {
           "show": false,
-          "dest": "$sni:443",
+          "target": "$sni:443",
           "xver": 0,
           "serverNames": [
             "$sni"
@@ -586,7 +648,7 @@ EOF
     setup_autostart
 
     # ---- Display connection info ----
-    show_connection_info "$uuid" "$server" "$public_key" "$short_id" "$sni"
+    show_connection_info "$uuid" "$server" "$public_key" "$short_id" "$sni" "$network" "$xhttp_path"
 
     cat <<EOF
 
@@ -598,6 +660,7 @@ Fake SNI           : $sni
 Connect to host    : $server
 Public key         : $public_key (saved to /etc/xray/public.key)
 Server address     : saved to $SERVER_ADDR_FILE
+Transport          : $network${xhttp_path:+ (path $xhttp_path)}
 Short ID           : $short_id
 UUID               : $uuid
 
@@ -616,6 +679,11 @@ add_client() {
     local server
     server="$(get_server_address)"
 
+    # Transport of the existing inbound (tcp or xhttp) decides the client format
+    local network xhttp_path
+    network="$(jq -r '.inbounds[0].streamSettings.network // "tcp"' "$CONFIG")"
+    xhttp_path="$(jq -r '.inbounds[0].streamSettings.xhttpSettings.path // "/"' "$CONFIG")"
+
     # Generate unique credentials
     local uuid short_id existing_sids
     uuid="$(generate_uuid)"
@@ -630,9 +698,10 @@ add_client() {
     # Append client and Short ID atomically (write to temp, then mv)
     local tmp
     tmp=$(mktemp)
-    jq --arg uid "$uuid" --arg sid "$short_id" '
+    # XHTTP clients have no flow (XTLS Vision works only over TCP)
+    jq --arg uid "$uuid" --arg sid "$short_id" --arg net "$network" '
         (.inbounds[0].settings.clients //= []) |
-        .inbounds[0].settings.clients += [{"id":$uid,"flow":"xtls-rprx-vision"}] |
+        .inbounds[0].settings.clients += [if $net == "xhttp" then {"id":$uid} else {"id":$uid,"flow":"xtls-rprx-vision"} end] |
         (.inbounds[0].streamSettings.realitySettings.shortIds //= []) |
         .inbounds[0].streamSettings.realitySettings.shortIds += [$sid]
     ' "$CONFIG" > "$tmp"
@@ -646,9 +715,9 @@ add_client() {
     local pbk sni
     pbk="$(cat /etc/xray/public.key 2>/dev/null || echo "")"
     sni="$(jq -r '.inbounds[0].streamSettings.realitySettings.serverNames[0] // empty' "$CONFIG")"
-    [[ -z "$sni" ]] && sni="$(jq -r '.inbounds[0].streamSettings.realitySettings.dest' "$CONFIG" | cut -d: -f1)"
+    [[ -z "$sni" ]] && sni="$(jq -r '.inbounds[0].streamSettings.realitySettings | .target // .dest' "$CONFIG" | cut -d: -f1)"
 
-    show_connection_info "$uuid" "$server" "$pbk" "$short_id" "$sni"
+    show_connection_info "$uuid" "$server" "$pbk" "$short_id" "$sni" "$network" "$xhttp_path"
 
     echo ""
     echo "Client added successfully! Xray has been restarted."
@@ -757,10 +826,12 @@ show_status() {
     server="$(head -n1 "$SERVER_ADDR_FILE" 2>/dev/null || true)"
 
     # Don't install jq just to show the menu — print "?" if it is missing
+    local transport="?"
     clients="?"; sni="?"
     if command -v jq &>/dev/null; then
         clients="$(jq '.inbounds[0].settings.clients | length' "$CONFIG" 2>/dev/null || echo "?")"
         sni="$(jq -r '.inbounds[0].streamSettings.realitySettings.serverNames[0] // "?"' "$CONFIG" 2>/dev/null || echo "?")"
+        transport="$(jq -r '.inbounds[0].streamSettings | if .network == "xhttp" then "XHTTP (path \(.xhttpSettings.path // "/"))" else "TCP + XTLS Vision" end' "$CONFIG" 2>/dev/null || echo "?")"
     fi
 
     echo ""
@@ -769,6 +840,7 @@ show_status() {
     echo "   Version  : ${version:-unknown}"
     echo "   Address  : ${server:-not saved}"
     echo "   SNI      : $sni"
+    echo "   Transport: $transport"
     echo "   Clients  : $clients"
     echo "   Log      : $XRAY_LOG"
 }

@@ -33,6 +33,8 @@ Differences from the host script:
 - Installs Xray-core (latest version, auto-detects architecture)
 - Detects the server's public IP — you can keep it or enter a domain instead
 - Generates REALITY keys, UUID, Short ID
+- Lets you choose the transport: **TCP + XTLS Vision** (default, supported by all clients) or **XHTTP** (see below)
+- Checks the SNI site against REALITY target requirements (TLS 1.3, HTTP/2, no redirect to another domain) and warns before continuing
 - Lets you choose DNS (Google, Cloudflare, Quad9, AdGuard, OpenDNS)
 - Configures systemd service on port 443 with autostart at boot
 - Validates the config and checks that Xray actually started (shows logs if not)
@@ -51,6 +53,7 @@ Xray VLESS+REALITY is already installed.
    Version  : 26.3.27
    Address  : 203.0.113.10
    SNI      : www.cloudflare.com
+   Transport: TCP + XTLS Vision
    Clients  : 3
    Log      : journalctl -u xray
 
@@ -81,6 +84,21 @@ The script installs all dependencies automatically.
 ## How It Works
 
 REALITY is a next-gen transport protocol by the Xray team. It makes your VPN traffic indistinguishable from a regular HTTPS connection to a real website (e.g. `www.google.com`). Unlike traditional TLS proxies, REALITY requires no certificates and no domain — just a VPS with a public IP.
+
+## Transport: TCP + Vision or XHTTP
+
+| | TCP + XTLS Vision | XHTTP |
+|---|---|---|
+| Client support | All apps | Newer apps only — check yours supports `type=xhttp` |
+| How it looks | One long TLS connection | HTTP requests (harder to fingerprint by connection pattern) |
+| Flow | `xtls-rprx-vision` | none (Vision works only over TCP) |
+
+XHTTP follows the [official Project X example](https://github.com/XTLS/Xray-examples/tree/main/VLESS-XHTTP-Reality):
+only a random `path` is set, `mode` is `auto` (the client picks `stream-one` with REALITY),
+everything else uses Xray defaults. Requires Xray-core v25.3.6 or newer. Do **not** enable
+Mux (mux.cool) in the client app when using XHTTP.
+
+The transport is chosen at install time; to switch, reinstall (clients get new links).
 
 ## Private Address Blocking
 
