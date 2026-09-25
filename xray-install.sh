@@ -22,11 +22,23 @@ NGINX_SITES=(/etc/nginx/sites-available/default /etc/nginx/conf.d/default.conf)
 # Utility functions
 # ==============================================================================
 
-# Check whether a previous installation exists and is active
+# Check whether a previous installation exists.
+# Deliberately does not require the service to be enabled: a disabled service
+# must not trigger a fresh install that would overwrite keys and clients.
 is_xray_installed() {
     [[ -f /usr/local/bin/xray ]] && \
     [[ -f "$CONFIG" ]] && \
-    systemctl is-enabled xray &>/dev/null
+    [[ -f /etc/systemd/system/xray.service ]]
+}
+
+# Make sure Xray starts at boot; re-enable it if autostart was turned off
+ensure_xray_autostart() {
+    systemctl is-enabled --quiet xray 2>/dev/null && return 0
+    if systemctl enable xray &>/dev/null; then
+        echo ">>> Xray autostart at boot was disabled — enabled it."
+    else
+        echo "Warning: could not enable Xray autostart (is the service masked?)." >&2
+    fi
 }
 
 # Resolve the server's public IPv4 address (multiple fallbacks)
@@ -650,8 +662,9 @@ remove_xray() {
 
 # Print a short summary of the service state and configuration
 show_status() {
-    local state since version server clients sni
+    local state since autostart version server clients sni
     state="$(systemctl is-active xray 2>/dev/null || true)"
+    autostart="$(systemctl is-enabled xray 2>/dev/null || true)"
     [[ "$state" == "active" ]] && since="$(systemctl show xray -p ActiveEnterTimestamp --value 2>/dev/null || true)"
     version="$(/usr/local/bin/xray version 2>/dev/null | awk 'NR==1{print $2}' || true)"
     server="$(head -n1 "$SERVER_ADDR_FILE" 2>/dev/null || true)"
@@ -664,11 +677,12 @@ show_status() {
     fi
 
     echo ""
-    echo "   Service : ${state:-unknown}${since:+ (since $since)}"
-    echo "   Version : ${version:-unknown}"
-    echo "   Address : ${server:-not saved}"
-    echo "   SNI     : $sni"
-    echo "   Clients : $clients"
+    echo "   Service  : ${state:-unknown}${since:+ (since $since)}"
+    echo "   Autostart: ${autostart:-unknown}"
+    echo "   Version  : ${version:-unknown}"
+    echo "   Address  : ${server:-not saved}"
+    echo "   SNI      : $sni"
+    echo "   Clients  : $clients"
 }
 
 manage_menu() {
@@ -704,6 +718,7 @@ if [[ "$EUID" -ne 0 ]]; then
 fi
 
 if is_xray_installed; then
+    ensure_xray_autostart
     manage_menu
 else
     new_install
