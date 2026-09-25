@@ -10,6 +10,20 @@ wget https://raw.githubusercontent.com/ndatg/xray-vless-reality-installer/main/x
 
 To manage clients later, just re-run `sudo bash xray-install.sh`.
 
+### Running in Docker (no systemd)
+
+Use `xray-install-docker.sh` inside a Docker container (Debian/Ubuntu, Fedora, Alpine, Arch images). Run it as root; bash is required:
+
+```bash
+wget https://raw.githubusercontent.com/ndatg/xray-vless-reality-installer/main/xray-install-docker.sh && bash xray-install-docker.sh
+```
+
+Differences from the host script:
+- Xray runs as a background process; log in `/var/log/xray.log`
+- No systemd unit, no dedicated user, no BBR, no nginx
+- Publish port 443 of the container (e.g. `docker run -p 443:443 ...`)
+- The process is not supervised: after a container restart, re-run the script and choose **Start / restart Xray**
+
 ## What It Does
 
 **First run** — interactive installation:
@@ -34,12 +48,14 @@ Xray VLESS+REALITY is already installed.
    Address  : 203.0.113.10
    SNI      : www.cloudflare.com
    Clients  : 3
+   Log      : journalctl -u xray
 
 Select an option:
    1) Add a new client
    2) Remove an existing client
-   3) Remove Xray
-   4) Exit
+   3) Start / restart Xray
+   4) Remove Xray
+   5) Exit
 ```
 
 If autostart at boot was turned off, the script re-enables it. Config changes
