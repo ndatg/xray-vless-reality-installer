@@ -151,7 +151,7 @@ add_private_block() {
     tmp=$(mktemp)
     jq --argjson ips "$PRIVATE_IPS_JSON" '
         .dns.tag = "dns-internal" |
-        .outbounds |= map(if .protocol == "freedom" then (.tag //= "direct") | .settings.domainStrategy = "ForceIP" else . end) |
+        .outbounds = ((.outbounds // []) | map(if .protocol == "freedom" then (.tag //= "direct") | .settings.domainStrategy = "ForceIP" else . end)) |
         (if any(.outbounds[]; .tag == "block") then . else .outbounds += [{"tag": "block", "protocol": "blackhole"}] end) |
         .routing.domainStrategy = "IPIfNonMatch" |
         .routing.rules = [
@@ -169,6 +169,8 @@ add_private_block() {
 # Offer the private-address block if the config does not have it yet
 offer_private_block() {
     command -v jq &>/dev/null || return 0
+    # Only touch a config Xray accepts; a broken one is reported by start/restart
+    validate_config &>/dev/null || return 0
     has_private_block && return 0
     echo ""
     echo "Your config lets clients reach the server's local and private addresses"

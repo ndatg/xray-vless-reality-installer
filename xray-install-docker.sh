@@ -30,6 +30,9 @@ SERVER_ADDR_FILE="/etc/xray/server.addr"
 PRIVATE_IPS_JSON='["0.0.0.0/8", "10.0.0.0/8", "100.64.0.0/10", "127.0.0.0/8", "169.254.0.0/16", "172.16.0.0/12", "192.168.0.0/16", "::1/128", "fc00::/7", "fe80::/10"]'
 XRAY_BIN="/usr/local/bin/xray"
 XRAY_LOG="/var/log/xray.log"
+# pgrep/pkill pattern for our Xray process only (not other Xray instances
+# or "xray run -test" validation runs)
+XRAY_MATCH="$XRAY_BIN run -config $CONFIG"
 
 # ==============================================================================
 # Utility functions
@@ -134,7 +137,7 @@ add_private_block() {
     tmp=$(mktemp)
     jq --argjson ips "$PRIVATE_IPS_JSON" '
         .dns.tag = "dns-internal" |
-        .outbounds |= map(if .protocol == "freedom" then (.tag //= "direct") | .settings.domainStrategy = "ForceIP" else . end) |
+        .outbounds = ((.outbounds // []) | map(if .protocol == "freedom" then (.tag //= "direct") | .settings.domainStrategy = "ForceIP" else . end)) |
         (if any(.outbounds[]; .tag == "block") then . else .outbounds += [{"tag": "block", "protocol": "blackhole"}] end) |
         .routing.domainStrategy = "IPIfNonMatch" |
         .routing.rules = [
@@ -152,6 +155,8 @@ add_private_block() {
 # Offer the private-address block if the config does not have it yet
 offer_private_block() {
     command -v jq &>/dev/null || return 0
+    # Only touch a config Xray accepts; a broken one is reported by start/restart
+    validate_config &>/dev/null || return 0
     has_private_block && return 0
     echo ""
     echo "Your config lets clients reach the server's local and private addresses"
@@ -166,7 +171,7 @@ offer_private_block() {
 # ==============================================================================
 
 xray_pid() {
-    pgrep -f "$XRAY_BIN run" 2>/dev/null | head -n1 || true
+    pgrep -f "$XRAY_MATCH" 2>/dev/null | head -n1 || true
 }
 
 is_xray_running() {
@@ -196,12 +201,12 @@ start_xray() {
 stop_xray() {
     is_xray_running || return 0
     echo ">>> Stopping Xray..."
-    pkill -f "$XRAY_BIN run" 2>/dev/null || true
+    pkill -f "$XRAY_MATCH" 2>/dev/null || true
     for _ in {1..10}; do
         is_xray_running || { echo ">>> Xray stopped."; return 0; }
         sleep 0.5
     done
-    pkill -9 -f "$XRAY_BIN run" 2>/dev/null || true
+    pkill -9 -f "$XRAY_MATCH" 2>/dev/null || true
     sleep 0.5
     echo ">>> Xray killed."
 }
@@ -228,7 +233,7 @@ $AUTOSTART_MARKER — managed by xray-install-docker.sh
 # Starts Xray if it is installed and not already running.
 PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 [ -x "$XRAY_BIN" ] && [ -f "$CONFIG" ] || exit 0
-pgrep -f "$XRAY_BIN run" >/dev/null 2>&1 && exit 0
+pgrep -f "$XRAY_MATCH" >/dev/null 2>&1 && exit 0
 nohup "$XRAY_BIN" run -config "$CONFIG" < /dev/null >> "$XRAY_LOG" 2>&1 &
 LAUNCHER
     chmod 755 "$AUTOSTART_BIN"
