@@ -9,7 +9,7 @@
 #
 # Differences from xray-install.sh:
 #   - Xray runs as a background process (nohup), log in /var/log/xray.log
-#   - No systemd unit, no dedicated user, no BBR (sysctl), no nginx
+#   - No systemd unit, no dedicated user, no BBR (sysctl)
 #   - Autostart without systemd: a cron check every minute (also restarts
 #     Xray after a crash), else OpenRC local.d or /etc/rc.local at boot.
 #     If none is available, start Xray from the menu after a container restart

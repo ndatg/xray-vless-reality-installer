@@ -20,7 +20,7 @@ wget https://raw.githubusercontent.com/ndatg/xray-vless-reality-installer/main/x
 
 Differences from the host script:
 - Xray runs as a background process; log in `/var/log/xray.log`
-- No systemd unit, no dedicated user, no BBR, no nginx
+- No systemd unit, no dedicated user, no BBR
 - Publish port 443 of the container (e.g. `docker run -p 443:443 ...`)
 - Autostart without systemd, detected automatically:
   - **cron** (if a cron daemon runs in the container): checks every minute, so Xray comes back after a container restart *and* after a crash
@@ -39,7 +39,6 @@ Differences from the host script:
 - Configures systemd service on port 443 with autostart at boot
 - Validates the config and checks that Xray actually started (shows logs if not)
 - Blocks clients from reaching the server's local and private addresses (see below)
-- Optionally sets up nginx on port 80 (redirect to the SNI site)
 - Enables TCP BBR for better speed (persistent across reboots)
 - Prints connection URI + QR code
 
@@ -71,13 +70,12 @@ If the config was created by an older version without the private-address block,
 the script offers to add it.
 
 **Remove Xray** deletes the binary, configuration, service and BBR settings.
-If the script set up nginx, it also offers to restore the original nginx config.
 
 ## Requirements
 
 - Linux VPS (Debian, Ubuntu, CentOS, Fedora, Arch)
 - Root access
-- Port 443 open (and port 80 if you enable the nginx redirect)
+- Port 443 open
 
 The script installs all dependencies automatically.
 
@@ -148,7 +146,6 @@ With XHTTP, keep **Mux** disabled in the app.
 | `/etc/xray/vless-*.png` | QR code images |
 | `/etc/systemd/system/xray.service` | Systemd service unit |
 | `/etc/sysctl.d/99-xray-bbr.conf` | TCP BBR settings |
-| `/etc/nginx/sites-available/default` or `/etc/nginx/conf.d/default.conf` | nginx redirect (only if enabled; original saved as `*.orig`) |
 
 ## License
 
