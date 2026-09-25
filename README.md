@@ -22,7 +22,10 @@ Differences from the host script:
 - Xray runs as a background process; log in `/var/log/xray.log`
 - No systemd unit, no dedicated user, no BBR, no nginx
 - Publish port 443 of the container (e.g. `docker run -p 443:443 ...`)
-- The process is not supervised: after a container restart, re-run the script and choose **Start / restart Xray**
+- Autostart without systemd, detected automatically:
+  - **cron** (if a cron daemon runs in the container): checks every minute, so Xray comes back after a container restart *and* after a crash
+  - otherwise **OpenRC** (`/etc/local.d`) or **`/etc/rc.local`**: starts Xray at container boot
+  - if none is available, set your provider's startup command to `/usr/local/bin/xray-autostart`, or start Xray from the menu (**Start / restart Xray**)
 
 ## What It Does
 

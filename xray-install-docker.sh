@@ -10,8 +10,10 @@
 # Differences from xray-install.sh:
 #   - Xray runs as a background process (nohup), log in /var/log/xray.log
 #   - No systemd unit, no dedicated user, no BBR (sysctl), no nginx
-#   - The process is not supervised: after a container restart start it again
-#     from the menu ("Start / restart Xray")
+#   - Autostart without systemd: a cron check every minute (also restarts
+#     Xray after a crash), else OpenRC local.d or /etc/rc.local at boot.
+#     If none is available, start Xray from the menu after a container restart
+#     or set your provider's startup command to /usr/local/bin/xray-autostart
 #
 # Publish port 443 of the container (e.g. docker run -p 443:443 ...).
 #
@@ -207,6 +209,106 @@ stop_xray() {
 restart_xray() {
     stop_xray
     start_xray
+}
+
+# ==============================================================================
+# Autostart (no systemd): cron watchdog, OpenRC local.d or rc.local
+# ==============================================================================
+
+AUTOSTART_BIN="/usr/local/bin/xray-autostart"
+AUTOSTART_MARKER="# xray-autostart"
+OPENRC_LOCAL="/etc/local.d/xray.start"
+
+# Standalone launcher used by every autostart hook: starts Xray if it is
+# installed and not running. Independent of where this script lives.
+write_autostart_launcher() {
+    cat > "$AUTOSTART_BIN" <<LAUNCHER
+#!/bin/sh
+$AUTOSTART_MARKER — managed by xray-install-docker.sh
+# Starts Xray if it is installed and not already running.
+PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+[ -x "$XRAY_BIN" ] && [ -f "$CONFIG" ] || exit 0
+pgrep -f "$XRAY_BIN run" >/dev/null 2>&1 && exit 0
+nohup "$XRAY_BIN" run -config "$CONFIG" < /dev/null >> "$XRAY_LOG" 2>&1 &
+LAUNCHER
+    chmod 755 "$AUTOSTART_BIN"
+}
+
+# Is a cron daemon running in this container right now?
+cron_running() {
+    command -v crontab &>/dev/null || return 1
+    pgrep -x cron &>/dev/null || pgrep -x crond &>/dev/null || pgrep -f 'busybox crond' &>/dev/null
+}
+
+# Print the autostart hook that is currently installed: cron|openrc|rc.local|none
+autostart_mechanism() {
+    if crontab -l 2>/dev/null | grep -qF "$AUTOSTART_MARKER"; then
+        echo "cron"
+    elif [[ -f "$OPENRC_LOCAL" ]]; then
+        echo "openrc"
+    elif grep -qF "$AUTOSTART_BIN" /etc/rc.local 2>/dev/null; then
+        echo "rc.local"
+    else
+        echo "none"
+    fi
+}
+
+# Can any autostart hook be installed in this container?
+autostart_available() {
+    cron_running || [[ -d /run/openrc ]] || \
+        { [[ -f /etc/rc.local ]] && [[ "$(cat /proc/1/comm 2>/dev/null)" == "init" ]]; }
+}
+
+# Install the first working autostart hook (no-op if one is already installed)
+setup_autostart() {
+    [[ "$(autostart_mechanism)" != "none" ]] && return 0
+    write_autostart_launcher
+
+    if cron_running; then
+        # Every minute: covers container restarts and Xray crashes.
+        # (busybox crond has no @reboot, so a per-minute check is used everywhere)
+        { crontab -l 2>/dev/null || true; echo "* * * * * $AUTOSTART_BIN $AUTOSTART_MARKER"; } | crontab -
+        echo ">>> Autostart: cron checks Xray every minute and starts it if needed."
+    elif [[ -d /run/openrc ]] && command -v rc-update &>/dev/null; then
+        mkdir -p /etc/local.d
+        printf '#!/bin/sh\n%s\n%s\n' "$AUTOSTART_MARKER" "$AUTOSTART_BIN" > "$OPENRC_LOCAL"
+        chmod 755 "$OPENRC_LOCAL"
+        rc-update add local default &>/dev/null || true
+        echo ">>> Autostart: OpenRC starts Xray at container boot ($OPENRC_LOCAL)."
+    elif [[ -f /etc/rc.local ]] && [[ "$(cat /proc/1/comm 2>/dev/null)" == "init" ]]; then
+        if grep -q '^exit 0' /etc/rc.local; then
+            sed -i "0,/^exit 0/s|^exit 0|$AUTOSTART_BIN $AUTOSTART_MARKER\nexit 0|" /etc/rc.local
+        else
+            echo "$AUTOSTART_BIN $AUTOSTART_MARKER" >> /etc/rc.local
+        fi
+        chmod +x /etc/rc.local
+        echo ">>> Autostart: /etc/rc.local starts Xray at container boot."
+    else
+        echo "Warning: no cron, OpenRC or rc.local found — Xray will not start automatically." >&2
+        echo "If your provider's panel has a startup command, set it to: $AUTOSTART_BIN" >&2
+        return 0
+    fi
+}
+
+# Remove every autostart hook and the launcher
+remove_autostart() {
+    if crontab -l 2>/dev/null | grep -qF "$AUTOSTART_MARKER"; then
+        # grep -v exits 1 when our line was the only one — that is fine
+        crontab -l 2>/dev/null | { grep -vF "$AUTOSTART_MARKER" || true; } | crontab -
+    fi
+    rm -f "$OPENRC_LOCAL"
+    [[ -f /etc/rc.local ]] && sed -i "\|$AUTOSTART_BIN|d" /etc/rc.local
+    rm -f "$AUTOSTART_BIN"
+}
+
+# Human-readable autostart state for the status block
+autostart_status() {
+    case "$(autostart_mechanism)" in
+        cron)     echo "cron (checks every minute)" ;;
+        openrc)   echo "OpenRC (at container boot)" ;;
+        rc.local) echo "rc.local (at container boot)" ;;
+        *)        echo "none (start from the menu after a container restart)" ;;
+    esac
 }
 
 # ==============================================================================
@@ -474,8 +576,9 @@ new_install() {
 EOF
     set_config_permissions
 
-    # ---- Start Xray (validates the config first) ----
+    # ---- Start Xray (validates the config first) and set up autostart ----
     restart_xray
+    setup_autostart
 
     # ---- Display connection info ----
     show_connection_info "$uuid" "$server" "$public_key" "$short_id" "$sni"
@@ -493,8 +596,8 @@ Server address     : saved to $SERVER_ADDR_FILE
 Short ID           : $short_id
 UUID               : $uuid
 
-Xray is not supervised: after a container restart, run this script again
-and choose "Start / restart Xray". Make sure port 443 is published.
+Autostart          : $(autostart_status)
+Make sure port 443 of the container is published.
 EOF
 }
 
@@ -623,9 +726,11 @@ remove_xray() {
     [[ ! "$confirm" =~ ^[Yy]$ ]] && { echo "Aborted."; return; }
 
     echo ""
+    # Remove autostart first so a cron check can't start Xray again
+    remove_autostart
     stop_xray
 
-    echo ">>> Removing Xray binary, configuration and log..."
+    echo ">>> Removing Xray binary, configuration, log and autostart..."
     rm -f "$XRAY_BIN"
     rm -rf /etc/xray
     rm -f "$XRAY_LOG"
@@ -655,7 +760,7 @@ show_status() {
 
     echo ""
     echo "   Service  : $state"
-    echo "   Autostart: no (start from the menu after a container restart)"
+    echo "   Autostart: $(autostart_status)"
     echo "   Version  : ${version:-unknown}"
     echo "   Address  : ${server:-not saved}"
     echo "   SNI      : $sni"
@@ -698,6 +803,10 @@ if [[ "$EUID" -ne 0 ]]; then
 fi
 
 if is_xray_installed; then
+    # Older installs had no autostart: add it if the container supports it
+    if [[ "$(autostart_mechanism)" == "none" ]] && autostart_available; then
+        setup_autostart
+    fi
     offer_private_block
     manage_menu
 else
