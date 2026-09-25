@@ -648,9 +648,33 @@ remove_xray() {
 # Management menu (shown when Xray is already installed)
 # ==============================================================================
 
+# Print a short summary of the service state and configuration
+show_status() {
+    local state since version server clients sni
+    state="$(systemctl is-active xray 2>/dev/null || true)"
+    [[ "$state" == "active" ]] && since="$(systemctl show xray -p ActiveEnterTimestamp --value 2>/dev/null || true)"
+    version="$(/usr/local/bin/xray version 2>/dev/null | awk 'NR==1{print $2}' || true)"
+    server="$(head -n1 "$SERVER_ADDR_FILE" 2>/dev/null || true)"
+
+    # Don't install jq just to show the menu — print "?" if it is missing
+    clients="?"; sni="?"
+    if command -v jq &>/dev/null; then
+        clients="$(jq '.inbounds[0].settings.clients | length' "$CONFIG" 2>/dev/null || echo "?")"
+        sni="$(jq -r '.inbounds[0].streamSettings.realitySettings.serverNames[0] // "?"' "$CONFIG" 2>/dev/null || echo "?")"
+    fi
+
+    echo ""
+    echo "   Service : ${state:-unknown}${since:+ (since $since)}"
+    echo "   Version : ${version:-unknown}"
+    echo "   Address : ${server:-not saved}"
+    echo "   SNI     : $sni"
+    echo "   Clients : $clients"
+}
+
 manage_menu() {
     echo ""
     echo "Xray VLESS+REALITY is already installed."
+    show_status
     echo ""
     echo "Select an option:"
     echo "   1) Add a new client"
